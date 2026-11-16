@@ -1,0 +1,17 @@
+bin/
+lab/bin/
+lab/e2e-run/
+lab/origin/
+lab/client/
+lab/client-data/
+data/
+__pycache__/
+*.pyc
+*.log
+*.pid
+.gocache/
+.gopath/
+demo-state.json
+demo-selection.json
+ui*.png
+lab/lib/

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SyncScope</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="dot"></span> SyncScope</div>
+    <div class="libname" id="libname">…</div>
+    <div class="status" id="status">
+      <span class="pill" id="conn">connecting</span>
+      <span class="pill" id="sync">—</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-head">
+        <span>Каталог</span>
+        <button class="icon" id="refresh" title="Обновить">↻</button>
+      </div>
+      <div class="tree" id="tree"><div class="muted">Загрузка…</div></div>
+    </aside>
+
+    <section class="content">
+      <div class="toolbar">
+        <nav class="crumbs" id="crumbs"></nav>
+        <input class="search" id="search" placeholder="Фильтр в текущей папке…" autocomplete="off">
+      </div>
+
+      <div class="summary">
+        <span id="summary">Ничего не выбрано</span>
+        <span class="hint">Выбор применяется сразу</span>
+      </div>
+
+      <div class="tablewrap">
+        <table class="files">
+          <thead>
+            <tr>
+              <th class="check"></th>
+              <th>Имя</th>
+              <th class="size">Размер</th>
+              <th class="mtime">Изменён</th>
+              <th class="state">Статус</th>
+              <th class="actions"></th>
+            </tr>
+          </thead>
+          <tbody id="rows">
+            <tr><td colspan="6" class="muted">Загрузка…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="statusbar" id="statusbar">—</div>
+    </section>
+  </main>
+
+  <template id="row-template">
+    <tr>
+      <td class="check"></td>
+      <td class="name"><button class="link"></button><span class="sub"></span></td>
+      <td class="size"></td>
+      <td class="mtime"></td>
+      <td class="state"><span class="badge"></span></td>
+      <td class="actions"></td>
+    </tr>
+  </template>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
