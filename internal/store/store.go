@@ -16,8 +16,23 @@ import (
 	"time"
 )
 
+type User struct {
+	ID        string    `json:"id"`
+	Subject   string    `json:"subject"`
+	Email     string    `json:"email,omitempty"`
+	Name      string    `json:"name,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type Session struct {
+	Token     string    `json:"token"`
+	UserID    string    `json:"user_id"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
 type Device struct {
 	ID          string    `json:"id"`
+	UserID      string    `json:"user_id,omitempty"`
 	Name        string    `json:"name"`
 	SyncthingID string    `json:"syncthing_id"`
 	Address     string    `json:"address,omitempty"`
@@ -53,6 +68,8 @@ type Node struct {
 }
 
 type state struct {
+	Users     map[string]*User    `json:"users"`
+	Sessions  map[string]*Session `json:"sessions"`
 	Devices   map[string]*Device  `json:"devices"`
 	Libraries map[string]*Library `json:"libraries"`
 	Grants    []*Grant            `json:"grants"`
@@ -68,6 +85,8 @@ type Store struct {
 
 func Open(p string) (*Store, error) {
 	s := &Store{path: p, data: state{
+		Users:     map[string]*User{},
+		Sessions:  map[string]*Session{},
 		Devices:   map[string]*Device{},
 		Libraries: map[string]*Library{},
 		Nodes:     map[string][]*Node{},
@@ -97,6 +116,12 @@ func Open(p string) (*Store, error) {
 	if s.data.Versions == nil {
 		s.data.Versions = map[string]uint64{}
 	}
+	if s.data.Users == nil {
+		s.data.Users = map[string]*User{}
+	}
+	if s.data.Sessions == nil {
+		s.data.Sessions = map[string]*Session{}
+	}
 	return s, nil
 }
 
@@ -116,6 +141,10 @@ func (s *Store) saveLocked() error {
 }
 
 func (s *Store) CreateDevice(name, syncthingID, address, platform string) (*Device, error) {
+	return s.CreateDeviceForUser("", name, syncthingID, address, platform)
+}
+
+func (s *Store) CreateDeviceForUser(userID, name, syncthingID, address, platform string) (*Device, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if strings.TrimSpace(syncthingID) == "" {
@@ -128,6 +157,7 @@ func (s *Store) CreateDevice(name, syncthingID, address, platform string) (*Devi
 	}
 	d := &Device{
 		ID:          "dev-" + randHex(6),
+		UserID:      userID,
 		Name:        strings.TrimSpace(name),
 		SyncthingID: syncthingID,
 		Address:     strings.TrimSpace(address),
@@ -144,6 +174,73 @@ func (s *Store) CreateDevice(name, syncthingID, address, platform string) (*Devi
 		return nil, err
 	}
 	return d, nil
+}
+
+func (s *Store) CreateOrGetUser(subject, email, name string) (*User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, u := range s.data.Users {
+		if u.Subject == subject {
+			if email != "" {
+				u.Email = email
+			}
+			if name != "" {
+				u.Name = name
+			}
+			if err := s.saveLocked(); err != nil {
+				return nil, err
+			}
+			return u, nil
+		}
+	}
+	u := &User{
+		ID:        "usr-" + randHex(6),
+		Subject:   subject,
+		Email:     email,
+		Name:      name,
+		CreatedAt: time.Now().UTC(),
+	}
+	s.data.Users[u.ID] = u
+	if err := s.saveLocked(); err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+func (s *Store) CreateSession(userID string, ttl time.Duration) (*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.data.Users[userID]; !ok {
+		return nil, fmt.Errorf("user not found")
+	}
+	sess := &Session{
+		Token:     randHex(32),
+		UserID:    userID,
+		ExpiresAt: time.Now().Add(ttl).UTC(),
+	}
+	s.data.Sessions[sess.Token] = sess
+	if err := s.saveLocked(); err != nil {
+		return nil, err
+	}
+	return sess, nil
+}
+
+func (s *Store) UserBySession(token string) (*User, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	sess, ok := s.data.Sessions[token]
+	if !ok || time.Now().After(sess.ExpiresAt) {
+		return nil, false
+	}
+	u, ok := s.data.Users[sess.UserID]
+	return u, ok
+}
+
+func (s *Store) User(id string) (*User, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	u, ok := s.data.Users[id]
+	return u, ok
 }
 
 func (s *Store) DeviceByToken(token string) (*Device, bool) {

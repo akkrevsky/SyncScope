@@ -13,6 +13,7 @@ import (
 
 	"syncscope/internal/api"
 	"syncscope/internal/crawler"
+	"syncscope/internal/oidc"
 	"syncscope/internal/store"
 )
 
@@ -20,6 +21,10 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:8088", "HTTP listen address")
 	data := flag.String("data", "data/state.json", "state file")
 	admin := flag.String("admin-token", env("SYNCSCOPE_ADMIN_TOKEN", "dev-admin-token"), "admin token")
+	oidcIssuer := flag.String("oidc-issuer", env("OIDC_ISSUER", ""), "OIDC issuer URL")
+	oidcClient := flag.String("oidc-client-id", env("OIDC_CLIENT_ID", ""), "OIDC client id")
+	oidcSecret := flag.String("oidc-client-secret", env("OIDC_CLIENT_SECRET", ""), "OIDC client secret")
+	oidcScopes := flag.String("oidc-scopes", env("OIDC_SCOPES", "openid profile email"), "OIDC scopes")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -28,13 +33,29 @@ func main() {
 		log.Error("open store", "err", err)
 		os.Exit(1)
 	}
-	srv := &http.Server{
-		Addr:              *addr,
-		Handler:           api.New(st, *admin, log).Handler(),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	apiServer := api.New(st, *admin, log)
+	if *oidcIssuer != "" && *oidcClient != "" {
+		oc, err := oidc.New(ctx, oidc.Config{
+			Issuer:       *oidcIssuer,
+			ClientID:     *oidcClient,
+			ClientSecret: *oidcSecret,
+			Scopes:       *oidcScopes,
+		})
+		if err != nil {
+			log.Error("oidc discovery", "err", err)
+			os.Exit(1)
+		}
+		apiServer.OIDC = oc
+		apiServer.Issuer = *oidcIssuer
+		log.Info("OIDC enabled", "issuer", *oidcIssuer)
+	}
+	srv := &http.Server{
+		Addr:              *addr,
+		Handler:           apiServer.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
 	go crawler.New(st, log).Run(ctx)
 
 	go func() {

@@ -7,6 +7,7 @@
 ## Что уже работает
 
 - Control plane: устройства, библиотеки, гранты, каталог, отзыв.
+- OIDC device flow: вход через провайдера, сессия, регистрация устройства.
 - Живой каталог: fsnotify + debounce, версия каталога в API.
 - Origin agent: создаёт одну Syncthing-папку на библиотеку, раздаёт её устройствам.
 - Client agent: создаёт локальную `receiveonly`-папку и ставит whitelist `.stignore`.
@@ -16,13 +17,13 @@
 - «Освободить место»: ignore → scan → удаление локальной копии.
 - Отзыв устройства: удаление из папок origin.
 - E2E на Syncthing v2.1.7 с двумя инстансами (включая UI и free space).
+- Force-relay E2E: локальный `strelaysrv`, оба узла только через relay.
 
 ## Чего пока нет
 
-- OIDC: используются admin/device tokens.
 - Выбор **отдельного файла**: Syncthing разворачивает `!/parent` в `!/parent/**`
   и тянет соседей. Это проверено в e2e; UI предлагает родительскую папку.
-- Placeholders, мобильный клиент, relay-тест, Postgres (сейчас JSON-файл).
+- Placeholders, мобильный клиент и Postgres (сейчас JSON-файл).
 - Браузерный UI, не desktop-оболочка: позже обернуть в Tauri/WebView и добавить трей.
 
 ## UI
@@ -49,6 +50,7 @@ make build
 make test
 make fetch-syncthing
 make e2e
+make relay-e2e   # локальный strelaysrv, соединение только через relay
 ```
 
 `make e2e` поднимает control plane, два Syncthing, создаёт библиотеку, выбирает
@@ -61,10 +63,12 @@ make e2e
 | `bin/syncscoped` | Control plane API + JSON store + crawler |
 | `bin/syncscope-origin` | Приводит Syncthing origin к желаемому состоянию |
 | `bin/syncscope-client` | Создаёт локальную папку и применяет выбор |
+| `bin/syncscope-login` | OIDC device flow + регистрация устройства |
 | `internal/ignore` | Генератор whitelist `.stignore` + тесты |
 | `internal/syncthing` | Минимальный REST-клиент Syncthing |
 | `internal/store` | Устройства, библиотеки, гранты, каталог |
 | `internal/crawler` | fsnotify-обновление каталога |
+| `internal/oidc` | OIDC discovery, device flow, userinfo |
 | `internal/webui` | Локальный UI-навигатор и selection state |
 | `lab/e2e.py` | E2E-стенд с двумя Syncthing |
 
@@ -111,6 +115,10 @@ curl -s http://127.0.0.1:8088/v1/catalog/lib-xxxx?parent=2024 \
 | GET | `/v1/catalog/{id}?parent=` | device |
 | GET | `/v1/origin/libraries` | admin |
 | GET | `/v1/health` | — |
+| GET | `/v1/auth/config` | — |
+| POST | `/v1/auth/device/start` | — |
+| POST | `/v1/auth/device/poll` | — |
+| GET | `/v1/me` | user session |
 
 Токены: `X-Admin-Token` для админских вызовов, `Authorization: Bearer` для
 устройства. Дефолтный admin token — `dev-admin-token`; в реальном deployment
@@ -118,6 +126,28 @@ curl -s http://127.0.0.1:8088/v1/catalog/lib-xxxx?parent=2024 \
 
 `state.json` содержит device-токены. Держите его с правами `0600`, не коммитьте
 и не отдавайте наружу. Control API слушает localhost; в production — за TLS-прокси.
+
+## Вход через OIDC
+
+Control plane запускается с провайдером:
+
+```bash
+./bin/syncscoped -addr 127.0.0.1:8088 -data data/state.json \
+  -oidc-issuer https://keycloak.example/realms/main \
+  -oidc-client-id syncscope \
+  -oidc-client-secret "$OIDC_CLIENT_SECRET"
+```
+
+Клиент проходит device flow и регистрирует Syncthing-устройство:
+
+```bash
+./bin/syncscope-login -control http://127.0.0.1:8088 \
+  -syncthing http://127.0.0.1:8385 -syncthing-key "$CLIENT_API_KEY" \
+  -out device-token.json
+```
+
+Токен из `device-token.json` передаётся клиентскому агенту в `-token`.
+Права на библиотеки по-прежнему выдаёт администратор через `/grants`.
 
 ## Запуск вручную
 
@@ -149,12 +179,15 @@ python3 lab/e2e.py
 ```
 
 `internal/ignore` покрыт golden-тестами: выбор папки, вложенность, исключения,
-экранирование, запрет `..` и выбор файла.
+экранирование, запрет `..` и запрет выбора отдельного файла.
+
+`make relay-e2e` поднимает локальный `strelaysrv`, настраивает оба Syncthing только на
+relay-адрес и проверяет, что соединение имеет тип `relay-client` и файл доезжает.
 
 ## Следующие шаги
 
-1. Заменить JSON store на Postgres и добавить OIDC device flow.
+1. Заменить JSON store на Postgres.
 2. Обернуть UI в desktop-оболочку (Tauri/WebView), добавить трей и автозапуск.
-3. Проверить relay pool в стенде (force relay на двух NAT-подобных инстансах).
+3. Проверить публичный relay pool (выбор по latency); локальный relay-путь уже покрыт.
 4. Placeholders и мобильный клиент.
 5. Собрать Windows/macOS пакет с встроенным Syncthing.

@@ -15,3 +15,7 @@ demo-state.json
 demo-selection.json
 ui*.png
 lab/lib/
+device-token.json
+lab/relay-bin/
+lab/relay-keys/
+lab/relay-run/

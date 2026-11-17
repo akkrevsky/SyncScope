@@ -8,7 +8,9 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
+	"syncscope/internal/oidc"
 	"syncscope/internal/store"
 )
 
@@ -16,6 +18,8 @@ type Server struct {
 	Store      *store.Store
 	AdminToken string
 	Log        *slog.Logger
+	OIDC       *oidc.Client
+	Issuer     string
 }
 
 func New(st *store.Store, adminToken string, log *slog.Logger) *Server {
@@ -31,7 +35,11 @@ func New(st *store.Store, adminToken string, log *slog.Logger) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", s.health)
-	mux.HandleFunc("POST /v1/devices", s.admin(s.createDevice))
+	mux.HandleFunc("GET /v1/auth/config", s.authConfig)
+	mux.HandleFunc("POST /v1/auth/device/start", s.authDeviceStart)
+	mux.HandleFunc("POST /v1/auth/device/poll", s.authDevicePoll)
+	mux.HandleFunc("GET /v1/me", s.me)
+	mux.HandleFunc("POST /v1/devices", s.createDevice)
 	mux.HandleFunc("GET /v1/devices", s.admin(s.listDevices))
 	mux.HandleFunc("POST /v1/devices/{id}/revoke", s.admin(s.revokeDevice))
 	mux.HandleFunc("POST /v1/libraries", s.admin(s.createLibrary))
@@ -59,12 +67,97 @@ func (s *Server) createDevice(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
-	d, err := s.Store.CreateDevice(req.Name, req.SyncthingID, req.Address, req.Platform)
+	var d *store.Device
+	var err error
+	if s.isAdmin(r) {
+		d, err = s.Store.CreateDevice(req.Name, req.SyncthingID, req.Address, req.Platform)
+	} else if u, ok := s.Store.UserBySession(bearer(r)); ok {
+		d, err = s.Store.CreateDeviceForUser(u.ID, req.Name, req.SyncthingID, req.Address, req.Platform)
+	} else {
+		fail(w, http.StatusUnauthorized, errors.New("admin token or user session required"))
+		return
+	}
 	if err != nil {
 		fail(w, http.StatusConflict, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"device": d, "token": d.Token})
+}
+
+func (s *Server) authConfig(w http.ResponseWriter, r *http.Request) {
+	enabled := s.OIDC != nil
+	out := map[string]any{"enabled": enabled}
+	if enabled {
+		out["issuer"] = s.Issuer
+		out["flow"] = "device_code"
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) authDeviceStart(w http.ResponseWriter, r *http.Request) {
+	if s.OIDC == nil {
+		fail(w, http.StatusNotImplemented, errors.New("OIDC is not configured"))
+		return
+	}
+	da, err := s.OIDC.StartDevice(r.Context())
+	if err != nil {
+		fail(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, da)
+}
+
+type pollRequest struct {
+	DeviceCode string `json:"device_code"`
+}
+
+func (s *Server) authDevicePoll(w http.ResponseWriter, r *http.Request) {
+	if s.OIDC == nil {
+		fail(w, http.StatusNotImplemented, errors.New("OIDC is not configured"))
+		return
+	}
+	var req pollRequest
+	if err := decode(r, &req); err != nil || req.DeviceCode == "" {
+		fail(w, http.StatusBadRequest, errors.New("device_code is required"))
+		return
+	}
+	tok, err := s.OIDC.Poll(r.Context(), req.DeviceCode)
+	if err != nil {
+		switch {
+		case errors.Is(err, oidc.ErrPending):
+			fail(w, http.StatusPreconditionRequired, errors.New("authorization_pending"))
+		case errors.Is(err, oidc.ErrSlowDown):
+			fail(w, http.StatusTooManyRequests, errors.New("slow_down"))
+		default:
+			fail(w, http.StatusBadGateway, err)
+		}
+		return
+	}
+	ui, err := s.OIDC.UserInfo(r.Context(), tok)
+	if err != nil {
+		fail(w, http.StatusBadGateway, err)
+		return
+	}
+	u, err := s.Store.CreateOrGetUser(ui.Subject, ui.Email, ui.Name)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
+	sess, err := s.Store.CreateSession(u.ID, 30*24*time.Hour)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"session_token": sess.Token, "user": u})
+}
+
+func (s *Server) me(w http.ResponseWriter, r *http.Request) {
+	u, ok := s.Store.UserBySession(bearer(r))
+	if !ok {
+		fail(w, http.StatusUnauthorized, errors.New("user session required"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"user": u})
 }
 
 func (s *Server) listDevices(w http.ResponseWriter, r *http.Request) {
