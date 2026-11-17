@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -28,37 +29,100 @@ func (s *stringsFlag) Set(v string) error {
 	return nil
 }
 
+type mountConfig struct {
+	Library       string `json:"library"`
+	Folder        string `json:"folder"`
+	Local         string `json:"local"`
+	OriginDevice  string `json:"origin_device"`
+	OriginAddress string `json:"origin_address"`
+}
+
+type clientConfig struct {
+	Control      string        `json:"control"`
+	Token        string        `json:"token"`
+	Syncthing    string        `json:"syncthing"`
+	SyncthingKey string        `json:"syncthing_key"`
+	State        string        `json:"state"`
+	UI           string        `json:"ui"`
+	Mounts       []mountConfig `json:"mounts"`
+}
+
 func main() {
+	configPath := flag.String("config", "", "JSON config with multiple mounts")
 	controlURL := flag.String("control", "http://127.0.0.1:8088", "control plane URL")
 	token := flag.String("token", env("SYNCSCOPE_DEVICE_TOKEN", ""), "device token")
 	stURL := flag.String("syncthing", "http://127.0.0.1:8385", "Syncthing API URL")
 	stKey := flag.String("syncthing-key", env("SYNCTHING_API_KEY", ""), "Syncthing API key")
-	libraryID := flag.String("library", "", "library id")
+	libraryID := flag.String("library", "", "library id (single-mount mode)")
 	folderID := flag.String("folder", "", "Syncthing folder id (default: library id)")
-	local := flag.String("local", "", "local folder path")
+	local := flag.String("local", "", "local folder path (single-mount mode)")
 	originDevice := flag.String("origin-device", "", "origin Syncthing device id")
 	originAddress := flag.String("origin-address", "", "origin address, e.g. tcp://127.0.0.1:22000")
 	statePath := flag.String("state", "syncscope-selection.json", "local selection state")
-	uiAddr := flag.String("ui", "", "serve the navigator UI on this address, e.g. 127.0.0.1:8099")
-	wait := flag.Bool("wait", false, "wait until the folder is idle")
+	uiAddr := flag.String("ui", "", "serve the navigator UI on this address")
+	wait := flag.Bool("wait", false, "wait until folders are idle")
 	timeout := flag.Duration("timeout", 60*time.Second, "wait timeout")
 	var dirs, excludes stringsFlag
-	flag.Var(&dirs, "select", "selected directory (repeatable)")
-	flag.Var(&excludes, "exclude", "excluded path (repeatable)")
+	flag.Var(&dirs, "select", "selected directory for the first mount (repeatable)")
+	flag.Var(&excludes, "exclude", "excluded path for the first mount (repeatable)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	if *libraryID == "" || *local == "" {
-		log.Error("-library and -local are required")
+	cfg := clientConfig{}
+	if *configPath != "" {
+		b, err := os.ReadFile(*configPath)
+		if err != nil {
+			log.Error("read config", "err", err)
+			os.Exit(1)
+		}
+		if err := json.Unmarshal(b, &cfg); err != nil {
+			log.Error("parse config", "err", err)
+			os.Exit(1)
+		}
+	}
+	if cfg.Control == "" {
+		cfg.Control = *controlURL
+	}
+	if cfg.Token == "" {
+		cfg.Token = *token
+	}
+	if cfg.Syncthing == "" {
+		cfg.Syncthing = *stURL
+	}
+	if cfg.SyncthingKey == "" {
+		cfg.SyncthingKey = *stKey
+	}
+	if cfg.State == "" {
+		cfg.State = *statePath
+	}
+	if *uiAddr != "" {
+		cfg.UI = *uiAddr
+	}
+	if len(cfg.Mounts) == 0 {
+		if *libraryID == "" || *local == "" {
+			log.Error("-library and -local are required without -config")
+			os.Exit(2)
+		}
+		folder := *folderID
+		if folder == "" {
+			folder = *libraryID
+		}
+		cfg.Mounts = []mountConfig{{
+			Library:       *libraryID,
+			Folder:        folder,
+			Local:         *local,
+			OriginDevice:  *originDevice,
+			OriginAddress: *originAddress,
+		}}
+	}
+	if cfg.Token == "" {
+		log.Error("device token is required")
 		os.Exit(2)
 	}
-	if *folderID == "" {
-		*folderID = *libraryID
-	}
 
-	ctl := control.New(*controlURL)
-	ctl.Token = *token
-	st := syncthing.New(*stURL, *stKey)
+	ctl := control.New(cfg.Control)
+	ctl.Token = cfg.Token
+	st := syncthing.New(cfg.Syncthing, cfg.SyncthingKey)
 	ctx := context.Background()
 
 	libs, err := ctl.Libraries(ctx)
@@ -66,63 +130,62 @@ func main() {
 		log.Error("list libraries", "err", err)
 		os.Exit(1)
 	}
-	var lib store.Library
+	byID := map[string]store.Library{}
 	for _, l := range libs {
-		if l.ID == *libraryID {
-			lib = l
-		}
+		byID[l.ID] = l
 	}
-	if lib.ID == "" {
-		log.Error("library is not available to this device", "library", *libraryID)
-		os.Exit(1)
-	}
-
 	status, err := st.Status(ctx)
 	if err != nil {
 		log.Error("syncthing status", "err", err)
 		os.Exit(1)
 	}
-	if *originDevice != "" {
-		if err := st.EnsureDevice(ctx, *originDevice, "origin", *originAddress); err != nil {
-			log.Error("ensure origin device", "err", err)
+
+	mounts := make([]webui.Mount, 0, len(cfg.Mounts))
+	origins := map[string]bool{}
+	for _, mc := range cfg.Mounts {
+		lib, ok := byID[mc.Library]
+		if !ok {
+			log.Error("library is not available to this device", "library", mc.Library)
 			os.Exit(1)
 		}
+		folder := mc.Folder
+		if folder == "" {
+			folder = mc.Library
+		}
+		if mc.OriginDevice != "" && !origins[mc.OriginDevice] {
+			if err := st.EnsureDevice(ctx, mc.OriginDevice, "origin", mc.OriginAddress); err != nil {
+				log.Error("ensure origin device", "device", mc.OriginDevice, "err", err)
+				os.Exit(1)
+			}
+			origins[mc.OriginDevice] = true
+		}
+		devices := []string{status.MyID}
+		if mc.OriginDevice != "" {
+			devices = append(devices, mc.OriginDevice)
+		}
+		folderCfg := map[string]any{
+			"id":               folder,
+			"label":            lib.Name,
+			"path":             mc.Local,
+			"type":             "receiveonly",
+			"fsWatcherEnabled": true,
+			"rescanIntervalS":  3600,
+		}
+		if _, err := st.EnsureFolder(ctx, folder, folderCfg); err != nil {
+			log.Error("ensure folder", "folder", folder, "err", err)
+			os.Exit(1)
+		}
+		if err := st.SetFolderDevices(ctx, folder, devices); err != nil {
+			log.Error("set folder devices", "folder", folder, "err", err)
+			os.Exit(1)
+		}
+		mounts = append(mounts, webui.Mount{Library: lib, FolderID: folder, LocalPath: mc.Local})
 	}
 
-	devices := []string{status.MyID}
-	if *originDevice != "" {
-		devices = append(devices, *originDevice)
-	}
-	folder := map[string]any{
-		"id":               *folderID,
-		"label":            lib.Name,
-		"path":             *local,
-		"type":             "receiveonly",
-		"fsWatcherEnabled": true,
-		"rescanIntervalS":  3600,
-	}
-	if _, err := st.EnsureFolder(ctx, *folderID, folder); err != nil {
-		log.Error("ensure folder", "err", err)
-		os.Exit(1)
-	}
-	if err := st.SetFolderDevices(ctx, *folderID, devices); err != nil {
-		log.Error("set folder devices", "err", err)
-		os.Exit(1)
-	}
-
-	selection, err := webui.LoadSelection(*statePath, *libraryID)
+	selections, err := webui.LoadSelections(cfg.State)
 	if err != nil {
 		log.Error("load selection", "err", err)
 		os.Exit(1)
-	}
-	ui := &webui.Server{
-		Control:   ctl,
-		Syncthing: st,
-		Library:   lib,
-		FolderID:  *folderID,
-		LocalPath: *local,
-		Selection: selection,
-		Log:       log,
 	}
 	if len(dirs) > 0 || len(excludes) > 0 {
 		inc, err := cleanFlagPaths(dirs)
@@ -135,42 +198,52 @@ func main() {
 			log.Error("exclude", "err", err)
 			os.Exit(2)
 		}
-		if err := selection.Set(inc, exc); err != nil {
+		if err := selections.Set(mounts[0].Library.ID, inc, exc); err != nil {
 			log.Error("save selection", "err", err)
 			os.Exit(1)
 		}
+	}
+	ui := &webui.Server{
+		Control:    ctl,
+		Syncthing:  st,
+		Mounts:     mounts,
+		Selections: selections,
+		Log:        log,
 	}
 	if err := ui.Apply(ctx); err != nil {
 		log.Error("apply selection", "err", err)
 		os.Exit(1)
 	}
-	sel := selection.Get()
-	fmt.Printf("folder=%s selected=%d excluded=%d\n", *folderID, len(sel.Included), len(sel.Excluded))
-
-	if *uiAddr != "" {
-		serveUI(ctx, ui, *uiAddr, log)
-		return
+	for _, m := range mounts {
+		sel := selections.Get(m.Library.ID)
+		fmt.Printf("mount=%s folder=%s selected=%d excluded=%d\n", m.Library.ID, m.FolderID, len(sel.Included), len(sel.Excluded))
 	}
 
+	if cfg.UI != "" {
+		serveUI(ctx, ui, cfg.UI, log)
+		return
+	}
 	if *wait {
-		minFiles := 0
-		if len(sel.Included) > 0 {
-			minFiles = 1
-		}
 		deadline := time.Now().Add(*timeout)
-		for time.Now().Before(deadline) {
-			fs, err := st.FolderStatus(ctx, *folderID)
-			if err != nil {
-				log.Error("folder status", "err", err)
-				break
+		for _, m := range mounts {
+			sel := selections.Get(m.Library.ID)
+			minFiles := 0
+			if len(sel.Included) > 0 {
+				minFiles = 1
 			}
-			if fs.State == "idle" && fs.NeedFiles == 0 && fs.LocalFiles >= minFiles {
-				fmt.Printf("status=idle local_files=%d\n", fs.LocalFiles)
-				return
+			for time.Now().Before(deadline) {
+				fs, err := st.FolderStatus(ctx, m.FolderID)
+				if err != nil {
+					log.Error("folder status", "err", err)
+					break
+				}
+				if fs.State == "idle" && fs.NeedFiles == 0 && fs.LocalFiles >= minFiles {
+					fmt.Printf("mount=%s status=idle local_files=%d\n", m.Library.ID, fs.LocalFiles)
+					break
+				}
+				time.Sleep(500 * time.Millisecond)
 			}
-			time.Sleep(500 * time.Millisecond)
 		}
-		log.Warn("timeout waiting for idle")
 	}
 }
 

@@ -18,14 +18,15 @@ type Selection struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-type SelectionStore struct {
+// Selections stores per-library selections in one local JSON file.
+type Selections struct {
 	mu   sync.RWMutex
 	path string
-	data Selection
+	data map[string]Selection
 }
 
-func LoadSelection(file, library string) (*SelectionStore, error) {
-	s := &SelectionStore{path: file, data: Selection{Library: library, Included: []string{}, Excluded: []string{}}}
+func LoadSelections(file string) (*Selections, error) {
+	s := &Selections{path: file, data: map[string]Selection{}}
 	b, err := os.ReadFile(file)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -33,39 +34,55 @@ func LoadSelection(file, library string) (*SelectionStore, error) {
 		}
 		return nil, err
 	}
-	if len(b) > 0 {
-		if err := json.Unmarshal(b, &s.data); err != nil {
-			return nil, fmt.Errorf("load selection: %w", err)
+	if len(b) == 0 {
+		return s, nil
+	}
+	if err := json.Unmarshal(b, &s.data); err != nil {
+		// Migrate the old single-selection file.
+		var one Selection
+		if err2 := json.Unmarshal(b, &one); err2 != nil {
+			return nil, fmt.Errorf("load selections: %w", err)
+		}
+		if one.Library != "" {
+			s.data[one.Library] = one
 		}
 	}
-	if s.data.Library != library {
-		s.data = Selection{Library: library, Included: []string{}, Excluded: []string{}}
-	}
-	if s.data.Included == nil {
-		s.data.Included = []string{}
-	}
-	if s.data.Excluded == nil {
-		s.data.Excluded = []string{}
+	for lib, sel := range s.data {
+		if sel.Included == nil {
+			sel.Included = []string{}
+		}
+		if sel.Excluded == nil {
+			sel.Excluded = []string{}
+		}
+		sel.Library = lib
+		s.data[lib] = sel
 	}
 	return s, nil
 }
 
-func (s *SelectionStore) Get() Selection {
+func (s *Selections) Get(library string) Selection {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return clone(s.data)
+	sel, ok := s.data[library]
+	if !ok {
+		return Selection{Library: library, Included: []string{}, Excluded: []string{}}
+	}
+	return clone(sel)
 }
 
-func (s *SelectionStore) Set(included, excluded []string) error {
+func (s *Selections) Set(library string, included, excluded []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.data.Included = dedupe(included)
-	s.data.Excluded = dedupe(excluded)
-	s.data.UpdatedAt = time.Now().UTC()
+	s.data[library] = Selection{
+		Library:   library,
+		Included:  dedupe(included),
+		Excluded:  dedupe(excluded),
+		UpdatedAt: time.Now().UTC(),
+	}
 	return s.saveLocked()
 }
 
-func (s *SelectionStore) saveLocked() error {
+func (s *Selections) saveLocked() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return err
 	}

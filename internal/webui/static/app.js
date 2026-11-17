@@ -9,6 +9,8 @@
     exc: [],
     status: {},
     filter: "",
+    mounts: [],
+    active: "",
     view: localStorage.getItem("syncscope-view") || "list",
     theme: localStorage.getItem("syncscope-theme") || "light",
     busy: false,
@@ -69,6 +71,7 @@
     return d.toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" });
   }
   const q = (p) => encodeURIComponent(p);
+  const mq = () => (state.active ? `&mount=${q(state.active)}` : "");
   const api = async (path, opts = {}) => {
     const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
     const data = await res.json().catch(() => ({}));
@@ -78,7 +81,7 @@
 
   async function ensureLoaded(path, force = false) {
     if (!force && state.nodes.has(path)) return;
-    const page = await api(`/api/catalog?parent=${q(path)}`);
+    const page = await api(`/api/catalog?parent=${q(path)}${mq()}`);
     state.nodes.set(path, page.nodes || []);
     state.versions.set(path, page.version || 0);
   }
@@ -96,6 +99,7 @@
     const params = new URLSearchParams(location.search);
     if (path) params.set("path", path);
     else params.delete("path");
+    if (state.active) params.set("mount", state.active);
     if (state.view !== "list") params.set("view", state.view);
     else params.delete("view");
     history.replaceState(null, "", `${location.pathname}${params.toString() ? "?" + params : ""}`);
@@ -144,7 +148,7 @@
     }
     state.busy = true;
     try {
-      const data = await api("/api/selection", { method: "POST", body: JSON.stringify({ included: inc, excluded: exc }) });
+      const data = await api("/api/selection", { method: "POST", body: JSON.stringify({ mount: state.active, included: inc, excluded: exc }) });
       state.inc = data.selection.included || [];
       state.exc = data.selection.excluded || [];
       await refreshStatus();
@@ -159,8 +163,8 @@
   async function freeSpace(path) {
     if (!confirm(`Удалить локальную копию «${path}»? На сервере файлы останутся.`)) return;
     try {
-      await api("/api/free-space", { method: "POST", body: JSON.stringify({ path }) });
-      const sel = await api("/api/selection");
+      await api("/api/free-space", { method: "POST", body: JSON.stringify({ mount: state.active, path }) });
+      const sel = await api(`/api/selection?mount=${q(state.active)}`);
       state.inc = sel.included || [];
       state.exc = sel.excluded || [];
       await refreshStatus();
@@ -334,7 +338,7 @@
         const img = document.createElement("img");
         img.loading = "lazy";
         img.alt = "";
-        img.src = `/api/preview?path=${q(node.path)}`;
+        img.src = `/api/preview?path=${q(node.path)}${mq()}`;
         img.onerror = () => { art.innerHTML = `<span class="ic">${ICONS.image}</span>`; };
         art.appendChild(img);
       } else {
@@ -377,6 +381,25 @@
     browser.appendChild(state.view === "grid" ? renderGrid(nodes) : renderList(nodes));
   }
 
+  function renderMounts() {
+    const el = $("#mounts");
+    el.textContent = "";
+    for (const m of state.mounts) {
+      const b = document.createElement("button");
+      b.className = "mount-item" + (m.id === state.active ? " active" : "");
+      const ic = document.createElement("span");
+      ic.style.cssText = "width:15px;height:15px;flex:0 0 auto";
+      ic.innerHTML = ICONS.folder;
+      const nm = document.createElement("span");
+      nm.className = "mname";
+      nm.textContent = m.name;
+      nm.title = m.local;
+      b.append(ic, nm);
+      b.onclick = () => switchMount(m.id);
+      el.appendChild(b);
+    }
+  }
+
   function renderHead() {
     const name = state.current ? state.current.split("/").pop() : (state.lib ? state.lib.name : "Корень");
     $("#foldertitle").textContent = name;
@@ -410,6 +433,7 @@
   }
 
   function render() {
+    renderMounts();
     renderCrumbs();
     renderTree();
     renderHead();
@@ -419,7 +443,7 @@
 
   async function refreshStatus() {
     try {
-      state.status = await api("/api/status");
+      state.status = await api(`/api/status?mount=${q(state.active)}`);
     } catch (_) {
       state.status = { connected: false, state: "unknown" };
     }
@@ -452,10 +476,10 @@
     $("#preview-meta").textContent = `${fmtSize(node.size)} · ${fmtDate(node.mod_time)} · ${statusFor(node).text}`;
     $("#preview-icon").innerHTML = icon(node);
     $("#preview-icon").style.cssText = "width:26px;height:26px;color:var(--accent)";
-    $("#preview-download").href = `/api/download?path=${q(node.path)}`;
+    $("#preview-download").href = `/api/download?path=${q(node.path)}${mq()}`;
     const body = $("#preview-body");
     body.textContent = "";
-    const src = `/api/preview?path=${q(node.path)}`;
+    const src = `/api/preview?path=${q(node.path)}${mq()}`;
     const k = kind(node);
     if (k === "image") {
       const img = document.createElement("img");
@@ -498,7 +522,7 @@
     if (document.hidden || state.busy) return;
     await refreshStatus();
     try {
-      const page = await api(`/api/catalog?parent=${q(state.current)}`);
+      const page = await api(`/api/catalog?parent=${q(state.current)}${mq()}`);
       if ((page.version || 0) !== (state.versions.get(state.current) || 0)) {
         state.nodes.set(state.current, page.nodes || []);
         state.versions.set(state.current, page.version || 0);
@@ -507,19 +531,50 @@
     } catch (_) {}
   }
 
+  async function switchMount(id) {
+    if (id === state.active) return;
+    state.active = id;
+    state.current = "";
+    state.nodes.clear();
+    state.versions.clear();
+    state.expanded.clear();
+    state.filter = "";
+    $("#search").value = "";
+    state.lib = state.mounts.find((m) => m.id === id) || null;
+    $("#libname").textContent = state.lib ? state.lib.name : "";
+    document.title = `SyncScope — ${state.lib ? state.lib.name : ""}`;
+    const [sel, st] = await Promise.all([
+      api(`/api/selection?mount=${q(state.active)}`),
+      api(`/api/status?mount=${q(state.active)}`),
+    ]);
+    state.inc = sel.included || [];
+    state.exc = sel.excluded || [];
+    state.status = st;
+    await ensureLoaded("");
+    await navigate("");
+  }
+
   async function init() {
     document.documentElement.dataset.theme = state.theme;
     const params = new URLSearchParams(location.search);
     if (params.get("view") === "grid") state.view = "grid";
     if (params.get("view") === "list") state.view = "list";
     try {
-      const [lib, sel, st] = await Promise.all([api("/api/library"), api("/api/selection"), api("/api/status")]);
-      state.lib = lib;
+      const data = await api("/api/mounts");
+      state.mounts = data.mounts || [];
+      if (!state.mounts.length) throw new Error("нет доступных хранилищ");
+      const wanted = params.get("mount");
+      state.active = state.mounts.some((m) => m.id === wanted) ? wanted : state.mounts[0].id;
+      state.lib = state.mounts.find((m) => m.id === state.active);
+      const [sel, st] = await Promise.all([
+        api(`/api/selection?mount=${q(state.active)}`),
+        api(`/api/status?mount=${q(state.active)}`),
+      ]);
       state.inc = sel.included || [];
       state.exc = sel.excluded || [];
       state.status = st;
-      $("#libname").textContent = lib.name;
-      document.title = `SyncScope — ${lib.name}`;
+      $("#libname").textContent = state.lib.name;
+      document.title = `SyncScope — ${state.lib.name}`;
       await ensureLoaded("");
       const initial = params.get("path") || "";
       if (initial) {

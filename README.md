@@ -13,10 +13,11 @@
 - Client agent: создаёт локальную `receiveonly`-папку и ставит whitelist `.stignore`.
 - Локальный UI-навигатор в духе Alist: header/toolbar, дерево, хлебные крошки,
   список/сетка, tri-state выбора папок, статусы, превью и скачивание локальных файлов.
+- Multi-mount: несколько библиотек в одном клиентском агенте, переключатель хранилищ в UI.
 - Выбор папки: скачивается только выбранное поддерево.
 - Исключения внутри выбранной папки.
 - «Освободить место»: ignore → scan → удаление локальной копии.
-- Deep links: `?path=2024&view=grid`, тёмная тема.
+- Deep links: `?mount=lib-photo&path=2024&view=grid`, тёмная тема.
 - Отзыв устройства: удаление из папок origin.
 - E2E на Syncthing v2.1.7 с двумя инстансами (включая UI и free space).
 - Force-relay E2E: локальный `strelaysrv`, оба узла только через relay.
@@ -34,11 +35,34 @@
 
 ![Навигатор SyncScope — сетка](docs/navigator-grid.png)
 
-Запуск UI на локальном клиенте:
+Запуск UI на локальном клиенте (одна библиотека):
 
 ```bash
 ./bin/syncscope-client -ui 127.0.0.1:8099 ... -select 2024
 # открыть http://127.0.0.1:8099
+```
+
+Несколько библиотек — через JSON-конфиг:
+
+```json
+{
+  "control": "http://127.0.0.1:8088",
+  "token": "device-token",
+  "syncthing": "http://127.0.0.1:8385",
+  "syncthing_key": "APIKEY",
+  "state": "syncscope-selection.json",
+  "ui": "127.0.0.1:8099",
+  "mounts": [
+    {"library": "lib-photo", "local": "/home/me/Sync/photo",
+     "origin_device": "ORIGIN-ID", "origin_address": "tcp://origin:22000"},
+    {"library": "lib-docs", "local": "/home/me/Sync/docs",
+     "origin_device": "ORIGIN-ID", "origin_address": "tcp://origin:22000"}
+  ]
+}
+```
+
+```bash
+./bin/syncscope-client -config client.json
 ```
 
 UI обслуживается самим клиентским агентом: device token не попадает в браузер,
@@ -192,8 +216,7 @@ relay-адрес и проверяет, что соединение имеет �
 
 ## Следующие шаги
 
-1. Multi-mount: несколько библиотек на клиентский агент и виртуальные корни в UI.
-2. Share-ссылки на папку/файл (origin/control plane, TTL, пароль).
-3. Postgres вместо JSON-store и админка библиотек/грантов.
-4. Обернуть UI в desktop-оболочку (Tauri/WebView), добавить трей и автозапуск.
-5. Placeholders и мобильный клиент.
+1. Share-ссылки на папку/файл (origin/control plane, TTL, пароль).
+2. Postgres вместо JSON-store и админка библиотек/грантов.
+3. Обернуть UI в desktop-оболочку (Tauri/WebView), добавить трей и автозапуск.
+4. Placeholders и мобильный клиент.

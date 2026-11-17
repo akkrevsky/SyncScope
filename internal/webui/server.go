@@ -24,14 +24,19 @@ import (
 //go:embed static
 var staticFS embed.FS
 
-type Server struct {
-	Control   *control.Client
-	Syncthing *syncthing.Client
+// Mount is one library exposed by the local UI.
+type Mount struct {
 	Library   store.Library
 	FolderID  string
 	LocalPath string
-	Selection *SelectionStore
-	Log       *slog.Logger
+}
+
+type Server struct {
+	Control    *control.Client
+	Syncthing  *syncthing.Client
+	Mounts     []Mount
+	Selections *Selections
+	Log        *slog.Logger
 }
 
 func (s *Server) Handler() http.Handler {
@@ -39,6 +44,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]string{"status": "ok"})
 	})
+	mux.HandleFunc("GET /api/mounts", s.mounts)
 	mux.HandleFunc("GET /api/library", s.library)
 	mux.HandleFunc("GET /api/catalog", s.catalog)
 	mux.HandleFunc("GET /api/selection", s.getSelection)
@@ -61,18 +67,36 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
+func (s *Server) mounts(w http.ResponseWriter, r *http.Request) {
+	type item struct {
+		ID     string `json:"id"`
+		Name   string `json:"name"`
+		Folder string `json:"folder"`
+		Local  string `json:"local"`
+	}
+	out := make([]item, 0, len(s.Mounts))
+	for _, m := range s.Mounts {
+		out = append(out, item{ID: m.Library.ID, Name: m.Library.Name, Folder: m.FolderID, Local: m.LocalPath})
+	}
+	writeJSON(w, 200, map[string]any{"mounts": out})
+}
+
 func (s *Server) library(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, map[string]any{
-		"id":     s.Library.ID,
-		"name":   s.Library.Name,
-		"folder": s.FolderID,
-		"local":  s.LocalPath,
-	})
+	m, err := s.mount(r.URL.Query().Get("mount"))
+	if err != nil {
+		writeJSON(w, 404, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"id": m.Library.ID, "name": m.Library.Name, "folder": m.FolderID, "local": m.LocalPath})
 }
 
 func (s *Server) catalog(w http.ResponseWriter, r *http.Request) {
-	parent := r.URL.Query().Get("parent")
-	page, err := s.Control.Catalog(r.Context(), s.Library.ID, parent)
+	m, err := s.mount(r.URL.Query().Get("mount"))
+	if err != nil {
+		writeJSON(w, 404, map[string]string{"error": err.Error()})
+		return
+	}
+	page, err := s.Control.Catalog(r.Context(), m.Library.ID, r.URL.Query().Get("parent"))
 	if err != nil {
 		writeJSON(w, 502, map[string]string{"error": err.Error()})
 		return
@@ -81,10 +105,16 @@ func (s *Server) catalog(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getSelection(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, s.Selection.Get())
+	m, err := s.mount(r.URL.Query().Get("mount"))
+	if err != nil {
+		writeJSON(w, 404, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, s.Selections.Get(m.Library.ID))
 }
 
 type selectionRequest struct {
+	Mount    string   `json:"mount"`
 	Included []string `json:"included"`
 	Excluded []string `json:"excluded"`
 }
@@ -93,6 +123,11 @@ func (s *Server) setSelection(w http.ResponseWriter, r *http.Request) {
 	var req selectionRequest
 	if err := decode(r, &req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	m, err := s.mount(req.Mount)
+	if err != nil {
+		writeJSON(w, 404, map[string]string{"error": err.Error()})
 		return
 	}
 	inc, err := normalizeAll(req.Included)
@@ -105,21 +140,21 @@ func (s *Server) setSelection(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
-	sel := Selection{Library: s.Library.ID, Included: inc, Excluded: exc, UpdatedAt: time.Now().UTC()}
+	sel := Selection{Library: m.Library.ID, Included: inc, Excluded: exc, UpdatedAt: time.Now().UTC()}
 	patterns, err := buildPatterns(sel)
 	if err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
-	if err := s.apply(r.Context(), patterns); err != nil {
+	if err := s.apply(r.Context(), m, patterns); err != nil {
 		writeJSON(w, 502, map[string]string{"error": err.Error()})
 		return
 	}
-	if err := s.Selection.Set(inc, exc); err != nil {
+	if err := s.Selections.Set(m.Library.ID, inc, exc); err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, 200, map[string]any{"selection": s.Selection.Get(), "patterns": patterns})
+	writeJSON(w, 200, map[string]any{"selection": s.Selections.Get(m.Library.ID), "patterns": patterns})
 }
 
 type statusResponse struct {
@@ -132,40 +167,13 @@ type statusResponse struct {
 	ConnAddr   string `json:"connection_address"`
 }
 
-func (s *Server) serveFile(download bool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		p, err := cleanRel(r.URL.Query().Get("path"))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		target := filepath.Join(s.LocalPath, filepath.FromSlash(p))
-		rel, err := filepath.Rel(s.LocalPath, target)
-		if err != nil || strings.HasPrefix(rel, "..") {
-			http.Error(w, "invalid path", http.StatusBadRequest)
-			return
-		}
-		st, err := os.Stat(target)
-		if err != nil {
-			http.Error(w, "file is not available locally", http.StatusNotFound)
-			return
-		}
-		if st.IsDir() {
-			http.Error(w, "is a directory", http.StatusBadRequest)
-			return
-		}
-		disp := "inline"
-		if download {
-			disp = "attachment"
-		}
-		w.Header().Set("Content-Disposition", mime.FormatMediaType(disp, map[string]string{"filename": filepath.Base(target)}))
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		http.ServeFile(w, r, target)
-	}
-}
-
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
-	fs, err := s.Syncthing.FolderStatus(r.Context(), s.FolderID)
+	m, err := s.mount(r.URL.Query().Get("mount"))
+	if err != nil {
+		writeJSON(w, 404, map[string]string{"error": err.Error()})
+		return
+	}
+	fs, err := s.Syncthing.FolderStatus(r.Context(), m.FolderID)
 	if err != nil {
 		writeJSON(w, 502, map[string]string{"error": err.Error()})
 		return
@@ -190,8 +198,46 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, out)
 }
 
+func (s *Server) serveFile(download bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		m, err := s.mount(r.URL.Query().Get("mount"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		p, err := cleanRel(r.URL.Query().Get("path"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		target := filepath.Join(m.LocalPath, filepath.FromSlash(p))
+		rel, err := filepath.Rel(m.LocalPath, target)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			http.Error(w, "invalid path", http.StatusBadRequest)
+			return
+		}
+		st, err := os.Stat(target)
+		if err != nil {
+			http.Error(w, "file is not available locally", http.StatusNotFound)
+			return
+		}
+		if st.IsDir() {
+			http.Error(w, "is a directory", http.StatusBadRequest)
+			return
+		}
+		disp := "inline"
+		if download {
+			disp = "attachment"
+		}
+		w.Header().Set("Content-Disposition", mime.FormatMediaType(disp, map[string]string{"filename": filepath.Base(target)}))
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		http.ServeFile(w, r, target)
+	}
+}
+
 type freeSpaceRequest struct {
-	Path string `json:"path"`
+	Mount string `json:"mount"`
+	Path  string `json:"path"`
 }
 
 func (s *Server) freeSpace(w http.ResponseWriter, r *http.Request) {
@@ -200,12 +246,17 @@ func (s *Server) freeSpace(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
+	m, err := s.mount(req.Mount)
+	if err != nil {
+		writeJSON(w, 404, map[string]string{"error": err.Error()})
+		return
+	}
 	p, err := cleanRel(req.Path)
 	if err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
-	sel := s.Selection.Get()
+	sel := s.Selections.Get(m.Library.ID)
 	if !covered(p, sel.Included) || covered(p, sel.Excluded) {
 		writeJSON(w, 400, map[string]string{"error": "path is not selected"})
 		return
@@ -216,27 +267,27 @@ func (s *Server) freeSpace(w http.ResponseWriter, r *http.Request) {
 	if covered(p, inc) {
 		exc = append(exc, p)
 	}
-	next := Selection{Library: s.Library.ID, Included: inc, Excluded: exc}
+	next := Selection{Library: m.Library.ID, Included: inc, Excluded: exc}
 	patterns, err := buildPatterns(next)
 	if err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
-	if err := s.apply(r.Context(), patterns); err != nil {
+	if err := s.apply(r.Context(), m, patterns); err != nil {
 		writeJSON(w, 502, map[string]string{"error": err.Error()})
 		return
 	}
-	if err := s.Selection.Set(inc, exc); err != nil {
+	if err := s.Selections.Set(m.Library.ID, inc, exc); err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
-	if err := s.waitIdle(r.Context(), 15*time.Second); err != nil {
+	if err := s.waitIdle(r.Context(), m, 15*time.Second); err != nil {
 		writeJSON(w, 409, map[string]string{"error": "folder did not become idle: " + err.Error()})
 		return
 	}
 
-	target := filepath.Join(s.LocalPath, filepath.FromSlash(p))
-	rel, err := filepath.Rel(s.LocalPath, target)
+	target := filepath.Join(m.LocalPath, filepath.FromSlash(p))
+	rel, err := filepath.Rel(m.LocalPath, target)
 	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
 		writeJSON(w, 400, map[string]string{"error": "invalid local path"})
 		return
@@ -248,17 +299,17 @@ func (s *Server) freeSpace(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "removed": p})
 }
 
-func (s *Server) apply(ctx context.Context, patterns []string) error {
-	if err := s.Syncthing.SetIgnores(ctx, s.FolderID, patterns); err != nil {
+func (s *Server) apply(ctx context.Context, m Mount, patterns []string) error {
+	if err := s.Syncthing.SetIgnores(ctx, m.FolderID, patterns); err != nil {
 		return err
 	}
-	return s.Syncthing.Scan(ctx, s.FolderID)
+	return s.Syncthing.Scan(ctx, m.FolderID)
 }
 
-func (s *Server) waitIdle(ctx context.Context, timeout time.Duration) error {
+func (s *Server) waitIdle(ctx context.Context, m Mount, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		fs, err := s.Syncthing.FolderStatus(ctx, s.FolderID)
+		fs, err := s.Syncthing.FolderStatus(ctx, m.FolderID)
 		if err != nil {
 			return err
 		}
@@ -268,6 +319,35 @@ func (s *Server) waitIdle(ctx context.Context, timeout time.Duration) error {
 		time.Sleep(500 * time.Millisecond)
 	}
 	return fmt.Errorf("timeout")
+}
+
+// Apply writes the current selection for every mount to Syncthing.
+func (s *Server) Apply(ctx context.Context) error {
+	for _, m := range s.Mounts {
+		patterns, err := buildPatterns(s.Selections.Get(m.Library.ID))
+		if err != nil {
+			return err
+		}
+		if err := s.apply(ctx, m, patterns); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) mount(id string) (Mount, error) {
+	if id == "" {
+		if len(s.Mounts) == 1 {
+			return s.Mounts[0], nil
+		}
+		return Mount{}, fmt.Errorf("mount is required")
+	}
+	for _, m := range s.Mounts {
+		if m.Library.ID == id {
+			return m, nil
+		}
+	}
+	return Mount{}, fmt.Errorf("unknown mount")
 }
 
 func buildPatterns(sel Selection) ([]string, error) {
@@ -299,25 +379,6 @@ func normalizeAll(in []string) ([]string, error) {
 	return out, nil
 }
 
-func contains(in []string, p string) bool {
-	for _, s := range in {
-		if s == p {
-			return true
-		}
-	}
-	return false
-}
-
-func remove(in []string, p string) []string {
-	out := in[:0]
-	for _, s := range in {
-		if s != p {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
 func removePrefix(in []string, p string) []string {
 	out := in[:0]
 	for _, s := range in {
@@ -347,13 +408,4 @@ func mustSub(f embed.FS, dir string) fs.FS {
 		panic(err)
 	}
 	return sub
-}
-
-// Apply writes the current selection to Syncthing and triggers a scan.
-func (s *Server) Apply(ctx context.Context) error {
-	patterns, err := buildPatterns(s.Selection.Get())
-	if err != nil {
-		return err
-	}
-	return s.apply(ctx, patterns)
 }

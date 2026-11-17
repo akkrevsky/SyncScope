@@ -206,3 +206,15 @@ svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width:
   .list-head, .row { grid-template-columns: 30px minmax(160px, 1fr) 80px 110px; }
   .list-head .date, .row .date, .list-head .actions, .row .actions { display: none; }
 }
+
+.mounts { padding: 8px; display: flex; flex-direction: column; gap: 2px; border-bottom: 1px solid var(--line); }
+.mount-item {
+  display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 4px 8px;
+  border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--ink);
+  cursor: pointer; text-align: left; width: 100%;
+}
+.mount-item:hover { background: var(--bg-soft); }
+.mount-item.active { background: var(--accent-soft); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 25%, transparent); }
+.mount-item svg { width: 15px; height: 15px; flex: 0 0 auto; color: currentColor; }
+.mount-item .mname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.mount-item .mcount { margin-left: auto; font-size: 10px; color: var(--muted); }

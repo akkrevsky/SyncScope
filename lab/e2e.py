@@ -300,36 +300,74 @@ def main():
     assert not exists("client-data", "2024", "private.txt"), "excluded file leaked"
     log("exclude OK")
 
-    log("navigator UI")
-    start([os.path.join(APP, "syncscope-client"),
-           "-state", state_file,
-           "-control", CONTROL, "-token", client_token,
-           "-syncthing", f"http://127.0.0.1:{PORTS['client']}",
-           "-syncthing-key", keys["client"],
-           "-library", lib["id"], "-folder", lib["id"],
-           "-local", os.path.join(RUN, "client-data"),
-           "-origin-device", origin_id,
-           "-origin-address", f"tcp://127.0.0.1:{SYNC['origin']}",
-           "-ui", "127.0.0.1:18099"], os.path.join(RUN, "ui.log"))
+    log("second library")
+    lib2root = os.path.join(RUN, "library2")
+    os.makedirs(os.path.join(lib2root, "docs"), exist_ok=True)
+    with open(os.path.join(lib2root, "docs", "readme.md"), "w") as f:
+        f.write("# second mount\n")
+    status, body = api("POST", "/v1/libraries", {"name": "Docs", "root_path": lib2root}, admin=ADMIN)
+    assert status == 201, (status, body)
+    lib2 = body["library"]
+    status, body = api("POST", f"/v1/libraries/{lib2['id']}/grants", {"device_id": dev_id}, admin=ADMIN)
+    assert status == 201, (status, body)
+    run([os.path.join(APP, "syncscope-origin"),
+         "-control", CONTROL, "-admin-token", ADMIN,
+         "-syncthing", f"http://127.0.0.1:{PORTS['origin']}",
+         "-syncthing-key", keys["origin"], "-once"])
+    os.makedirs(os.path.join(RUN, "client-data2"), exist_ok=True)
+
+    log("navigator UI (multi-mount)")
+    cfg_path = os.path.join(RUN, "client.json")
+    with open(cfg_path, "w") as f:
+        json.dump({
+            "control": CONTROL,
+            "token": client_token,
+            "syncthing": f"http://127.0.0.1:{PORTS['client']}",
+            "syncthing_key": keys["client"],
+            "state": state_file,
+            "ui": "127.0.0.1:18099",
+            "mounts": [
+                {"library": lib["id"], "local": os.path.join(RUN, "client-data"),
+                 "origin_device": origin_id, "origin_address": f"tcp://127.0.0.1:{SYNC['origin']}"},
+                {"library": lib2["id"], "local": os.path.join(RUN, "client-data2"),
+                 "origin_device": origin_id, "origin_address": f"tcp://127.0.0.1:{SYNC['origin']}"},
+            ],
+        }, f, indent=2)
+    start([os.path.join(APP, "syncscope-client"), "-config", cfg_path],
+          os.path.join(RUN, "ui.log"))
     wait_http("http://127.0.0.1:18099/api/health")
     html = urllib.request.urlopen("http://127.0.0.1:18099/", timeout=5).read().decode()
     assert "SyncScope" in html, "UI index missing"
-    cat = ui_json("/api/catalog?parent=")
+    mounts = ui_json("/api/mounts")
+    assert len(mounts["mounts"]) == 2, mounts
+
+    cat = ui_json(f"/api/catalog?mount={lib['id']}&parent=")
     assert len(cat["nodes"]) == 2, cat
-    preview = urllib.request.urlopen("http://127.0.0.1:18099/api/preview?path=2024/a.txt", timeout=5).read()
+    preview = urllib.request.urlopen(
+        f"http://127.0.0.1:18099/api/preview?mount={lib['id']}&path=2024/a.txt", timeout=5).read()
     assert preview == b"selected\n", preview
-    download = urllib.request.urlopen("http://127.0.0.1:18099/api/download?path=2024/a.txt", timeout=5)
+    download = urllib.request.urlopen(
+        f"http://127.0.0.1:18099/api/download?mount={lib['id']}&path=2024/a.txt", timeout=5)
     assert download.status == 200
     try:
-        urllib.request.urlopen("http://127.0.0.1:18099/api/preview?path=../etc/passwd", timeout=5)
+        urllib.request.urlopen(
+            f"http://127.0.0.1:18099/api/preview?mount={lib['id']}&path=../etc/passwd", timeout=5)
         raise AssertionError("path traversal was not rejected")
     except urllib.error.HTTPError as e:
         assert e.code in (400, 404), e.code
-    ui_json("/api/selection", "POST", {"included": ["2025"], "excluded": []})
+
+    log("select second mount")
+    ui_json("/api/selection", "POST", {"mount": lib2["id"], "included": ["docs"], "excluded": []})
+    wait_file("client-data2/docs/readme.md")
+    cat2 = ui_json(f"/api/catalog?mount={lib2['id']}&parent=docs")
+    assert any(n["name"] == "readme.md" for n in cat2["nodes"]), cat2
+    log("multi-mount OK")
+
+    ui_json("/api/selection", "POST", {"mount": lib["id"], "included": ["2025"], "excluded": []})
     wait_file("client-data/2025/report.pdf")
-    status = ui_json("/api/status")
+    status = ui_json(f"/api/status?mount={lib['id']}")
     assert "state" in status, status
-    ui_json("/api/free-space", "POST", {"path": "2025"}, timeout=30)
+    ui_json("/api/free-space", "POST", {"mount": lib["id"], "path": "2025"}, timeout=30)
     time.sleep(0.5)
     assert not exists("client-data", "2025"), "free space did not remove local copy"
     assert os.path.exists(os.path.join(libroot, "2025", "report.pdf")), "free space touched origin"
@@ -351,9 +389,10 @@ def main():
          "-control", CONTROL, "-admin-token", ADMIN,
          "-syncthing", f"http://127.0.0.1:{PORTS['origin']}",
          "-syncthing-key", keys["origin"], "-once"])
-    folder = st(PORTS["origin"], keys["origin"], f"/rest/config/folders/{lib['id']}")
-    ids = [d["deviceID"] for d in folder["devices"]]
-    assert client_id not in ids, ids
+    for lid in (lib["id"], lib2["id"]):
+        folder = st(PORTS["origin"], keys["origin"], f"/rest/config/folders/{lid}")
+        ids = [d["deviceID"] for d in folder["devices"]]
+        assert client_id not in ids, (lid, ids)
     log("revocation OK")
 
     print("E2E PASS")
