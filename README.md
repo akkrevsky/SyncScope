@@ -17,6 +17,7 @@
 - Выбор папки: скачивается только выбранное поддерево.
 - Исключения внутри выбранной папки.
 - «Освободить место»: ignore → scan → удаление локальной копии.
+- Публичные share-ссылки: папка/файл, TTL, пароль, страница и скачивание с origin.
 - Deep links: `?mount=lib-photo&path=2024&view=grid`, тёмная тема.
 - Отзыв устройства: удаление из папок origin.
 - E2E на Syncthing v2.1.7 с двумя инстансами (включая UI и free space).
@@ -99,6 +100,8 @@ make relay-e2e   # локальный strelaysrv, соединение толь�
 | `internal/store` | Устройства, библиотеки, гранты, каталог |
 | `internal/crawler` | fsnotify-обновление каталога |
 | `internal/oidc` | OIDC discovery, device flow, userinfo |
+| `internal/share` | HMAC-подпись публичных ссылок |
+| `internal/originshare` | Публичная страница и download с origin |
 | `internal/webui` | Локальный UI-навигатор и selection state |
 | `lab/e2e.py` | E2E-стенд с двумя Syncthing |
 
@@ -149,6 +152,7 @@ curl -s http://127.0.0.1:8088/v1/catalog/lib-xxxx?parent=2024 \
 | POST | `/v1/auth/device/start` | — |
 | POST | `/v1/auth/device/poll` | — |
 | GET | `/v1/me` | user session |
+| POST | `/v1/shares` | device session, `{library,path,is_dir,expires_in,password}` |
 
 Токены: `X-Admin-Token` для админских вызовов, `Authorization: Bearer` для
 устройства. Дефолтный admin token — `dev-admin-token`; в реальном deployment
@@ -178,6 +182,33 @@ Control plane запускается с провайдером:
 
 Токен из `device-token.json` передаётся клиентскому агенту в `-token`.
 Права на библиотеки по-прежнему выдаёт администратор через `/grants`.
+
+## Публичные ссылки
+
+Control plane подписывает ссылку HMAC, origin сам отдаёт страницу и файл:
+
+```bash
+./bin/syncscoped ... -share-secret "$SHARE_SECRET"
+./bin/syncscope-origin ... -http 0.0.0.0:8090 \
+  -share-secret "$SHARE_SECRET" -share-base /syncscope-share/
+```
+
+`origin_url` библиотеки задаётся при создании:
+
+```bash
+curl -X POST http://127.0.0.1:8088/v1/libraries \
+  -H "X-Admin-Token: $ADMIN" -H 'Content-Type: application/json' \
+  -d '{"name":"Photo","root_path":"/srv/photo","origin_url":"https://example/share"}'
+```
+
+`POST /v1/shares` возвращает URL вида `https://example/share/s/<token>`.
+Токен содержит библиотеку, путь, срок и (опционально) хеш пароля; origin проверяет
+подпись и отдаёт листинг/файл. Отозвать ссылку до истечения нельзя — для MVP.
+
+## Деплой
+
+Пример Docker-развёртывания: [deploy/README.md](deploy/README.md).
+Текущий demo-инстанс: `http://akkrevsky.ru:8081/syncscope/` (basic auth).
 
 ## Запуск вручную
 
@@ -216,7 +247,7 @@ relay-адрес и проверяет, что соединение имеет �
 
 ## Следующие шаги
 
-1. Share-ссылки на папку/файл (origin/control plane, TTL, пароль).
+1. Отзыв share-ссылок и список активных ссылок.
 2. Postgres вместо JSON-store и админка библиотек/грантов.
 3. Обернуть UI в desktop-оболочку (Tauri/WebView), добавить трей и автозапуск.
 4. Placeholders и мобильный клиент.

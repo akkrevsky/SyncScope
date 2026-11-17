@@ -25,6 +25,7 @@ func main() {
 	oidcClient := flag.String("oidc-client-id", env("OIDC_CLIENT_ID", ""), "OIDC client id")
 	oidcSecret := flag.String("oidc-client-secret", env("OIDC_CLIENT_SECRET", ""), "OIDC client secret")
 	oidcScopes := flag.String("oidc-scopes", env("OIDC_SCOPES", "openid profile email"), "OIDC scopes")
+	shareSecret := flag.String("share-secret", env("SHARE_SECRET", ""), "HMAC secret for public share links")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -36,6 +37,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	apiServer := api.New(st, *admin, log)
+	apiServer.ShareSecret = *shareSecret
 	if *oidcIssuer != "" && *oidcClient != "" {
 		oc, err := oidc.New(ctx, oidc.Config{
 			Issuer:       *oidcIssuer,

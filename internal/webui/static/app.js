@@ -81,7 +81,7 @@
 
   async function ensureLoaded(path, force = false) {
     if (!force && state.nodes.has(path)) return;
-    const page = await api(`/api/catalog?parent=${q(path)}${mq()}`);
+    const page = await api(`api/catalog?parent=${q(path)}${mq()}`);
     state.nodes.set(path, page.nodes || []);
     state.versions.set(path, page.version || 0);
   }
@@ -148,7 +148,7 @@
     }
     state.busy = true;
     try {
-      const data = await api("/api/selection", { method: "POST", body: JSON.stringify({ mount: state.active, included: inc, excluded: exc }) });
+      const data = await api("api/selection", { method: "POST", body: JSON.stringify({ mount: state.active, included: inc, excluded: exc }) });
       state.inc = data.selection.included || [];
       state.exc = data.selection.excluded || [];
       await refreshStatus();
@@ -160,11 +160,39 @@
     }
   }
 
+  async function shareNode(node) {
+    const password = prompt("Пароль для ссылки (необязательно):", "");
+    if (password === null) return;
+    const daysRaw = prompt("Срок действия, дней:", "7");
+    if (daysRaw === null) return;
+    const days = Math.max(1, Math.min(30, parseInt(daysRaw, 10) || 7));
+    try {
+      const link = await api("api/share", {
+        method: "POST",
+        body: JSON.stringify({
+          mount: state.active,
+          path: node.path,
+          is_dir: node.is_dir,
+          expires_in: days * 86400,
+          password,
+        }),
+      });
+      try {
+        await navigator.clipboard.writeText(link.url);
+        alert("Ссылка скопирована:\n" + link.url);
+      } catch (_) {
+        prompt("Ссылка:", link.url);
+      }
+    } catch (e) {
+      alert("Не удалось создать ссылку: " + e.message);
+    }
+  }
+
   async function freeSpace(path) {
     if (!confirm(`Удалить локальную копию «${path}»? На сервере файлы останутся.`)) return;
     try {
-      await api("/api/free-space", { method: "POST", body: JSON.stringify({ mount: state.active, path }) });
-      const sel = await api(`/api/selection?mount=${q(state.active)}`);
+      await api("api/free-space", { method: "POST", body: JSON.stringify({ mount: state.active, path }) });
+      const sel = await api(`api/selection?mount=${q(state.active)}`);
       state.inc = sel.included || [];
       state.exc = sel.excluded || [];
       await refreshStatus();
@@ -308,9 +336,16 @@
       st.appendChild(statusBadge(node));
       const actions = document.createElement("div");
       actions.className = "actions";
+      const share = document.createElement("button");
+      share.className = "mini";
+      share.textContent = "Ссылка";
+      share.title = "Публичная ссылка";
+      share.onclick = (e) => { e.stopPropagation(); shareNode(node); };
+      actions.appendChild(share);
       if (node.is_dir && selected(node.path)) {
         const b = document.createElement("button");
         b.className = "mini";
+        b.style.marginLeft = "4px";
         b.textContent = "Освободить";
         b.onclick = (e) => { e.stopPropagation(); freeSpace(node.path); };
         actions.appendChild(b);
@@ -338,7 +373,7 @@
         const img = document.createElement("img");
         img.loading = "lazy";
         img.alt = "";
-        img.src = `/api/preview?path=${q(node.path)}${mq()}`;
+        img.src = `api/preview?path=${q(node.path)}${mq()}`;
         img.onerror = () => { art.innerHTML = `<span class="ic">${ICONS.image}</span>`; };
         art.appendChild(img);
       } else {
@@ -353,6 +388,11 @@
       const sz = document.createElement("span");
       sz.textContent = node.is_dir ? "папка" : fmtSize(node.size);
       meta.append(sz, statusBadge(node));
+      const share = document.createElement("button");
+      share.className = "mini";
+      share.textContent = "Ссылка";
+      share.onclick = (e) => { e.stopPropagation(); shareNode(node); };
+      meta.appendChild(share);
       if (node.is_dir && selected(node.path)) {
         const b = document.createElement("button");
         b.className = "mini";
@@ -443,7 +483,7 @@
 
   async function refreshStatus() {
     try {
-      state.status = await api(`/api/status?mount=${q(state.active)}`);
+      state.status = await api(`api/status?mount=${q(state.active)}`);
     } catch (_) {
       state.status = { connected: false, state: "unknown" };
     }
@@ -476,10 +516,10 @@
     $("#preview-meta").textContent = `${fmtSize(node.size)} · ${fmtDate(node.mod_time)} · ${statusFor(node).text}`;
     $("#preview-icon").innerHTML = icon(node);
     $("#preview-icon").style.cssText = "width:26px;height:26px;color:var(--accent)";
-    $("#preview-download").href = `/api/download?path=${q(node.path)}${mq()}`;
+    $("#preview-download").href = `api/download?path=${q(node.path)}${mq()}`;
     const body = $("#preview-body");
     body.textContent = "";
-    const src = `/api/preview?path=${q(node.path)}${mq()}`;
+    const src = `api/preview?path=${q(node.path)}${mq()}`;
     const k = kind(node);
     if (k === "image") {
       const img = document.createElement("img");
@@ -522,7 +562,7 @@
     if (document.hidden || state.busy) return;
     await refreshStatus();
     try {
-      const page = await api(`/api/catalog?parent=${q(state.current)}${mq()}`);
+      const page = await api(`api/catalog?parent=${q(state.current)}${mq()}`);
       if ((page.version || 0) !== (state.versions.get(state.current) || 0)) {
         state.nodes.set(state.current, page.nodes || []);
         state.versions.set(state.current, page.version || 0);
@@ -544,8 +584,8 @@
     $("#libname").textContent = state.lib ? state.lib.name : "";
     document.title = `SyncScope — ${state.lib ? state.lib.name : ""}`;
     const [sel, st] = await Promise.all([
-      api(`/api/selection?mount=${q(state.active)}`),
-      api(`/api/status?mount=${q(state.active)}`),
+      api(`api/selection?mount=${q(state.active)}`),
+      api(`api/status?mount=${q(state.active)}`),
     ]);
     state.inc = sel.included || [];
     state.exc = sel.excluded || [];
@@ -560,15 +600,15 @@
     if (params.get("view") === "grid") state.view = "grid";
     if (params.get("view") === "list") state.view = "list";
     try {
-      const data = await api("/api/mounts");
+      const data = await api("api/mounts");
       state.mounts = data.mounts || [];
       if (!state.mounts.length) throw new Error("нет доступных хранилищ");
       const wanted = params.get("mount");
       state.active = state.mounts.some((m) => m.id === wanted) ? wanted : state.mounts[0].id;
       state.lib = state.mounts.find((m) => m.id === state.active);
       const [sel, st] = await Promise.all([
-        api(`/api/selection?mount=${q(state.active)}`),
-        api(`/api/status?mount=${q(state.active)}`),
+        api(`api/selection?mount=${q(state.active)}`),
+        api(`api/status?mount=${q(state.active)}`),
       ]);
       state.inc = sel.included || [];
       state.exc = sel.excluded || [];

@@ -66,7 +66,7 @@
 | список/сетка | есть, плюс tri-state выбора папок |
 | sidebar/tree | есть |
 | тёмная тема | есть |
-| share-ссылки | нет |
+| share-ссылки | есть: HMAC-токены, TTL, пароль, страница origin |
 | WebDAV/S3/FTP | нет (у Syncthing свой протокол) |
 | uploads/rename/move/delete | нет (MVP read-only) |
 | роли и path scope | библиотеки + ACL уровня библиотеки |

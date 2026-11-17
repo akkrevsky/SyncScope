@@ -7,19 +7,22 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"syncscope/internal/oidc"
+	"syncscope/internal/share"
 	"syncscope/internal/store"
 )
 
 type Server struct {
-	Store      *store.Store
-	AdminToken string
-	Log        *slog.Logger
-	OIDC       *oidc.Client
-	Issuer     string
+	Store       *store.Store
+	AdminToken  string
+	Log         *slog.Logger
+	OIDC        *oidc.Client
+	Issuer      string
+	ShareSecret string
 }
 
 func New(st *store.Store, adminToken string, log *slog.Logger) *Server {
@@ -39,6 +42,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/auth/device/start", s.authDeviceStart)
 	mux.HandleFunc("POST /v1/auth/device/poll", s.authDevicePoll)
 	mux.HandleFunc("GET /v1/me", s.me)
+	mux.HandleFunc("POST /v1/shares", s.device(s.createShare))
 	mux.HandleFunc("POST /v1/devices", s.createDevice)
 	mux.HandleFunc("GET /v1/devices", s.admin(s.listDevices))
 	mux.HandleFunc("POST /v1/devices/{id}/revoke", s.admin(s.revokeDevice))
@@ -185,8 +189,9 @@ func (s *Server) revokeDevice(w http.ResponseWriter, r *http.Request) {
 }
 
 type libraryRequest struct {
-	Name     string `json:"name"`
-	RootPath string `json:"root_path"`
+	Name      string `json:"name"`
+	RootPath  string `json:"root_path"`
+	OriginURL string `json:"origin_url"`
 }
 
 func (s *Server) createLibrary(w http.ResponseWriter, r *http.Request) {
@@ -199,6 +204,13 @@ func (s *Server) createLibrary(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return
+	}
+	if req.OriginURL != "" {
+		if err := s.Store.SetLibraryOrigin(lib.ID, req.OriginURL); err != nil {
+			fail(w, http.StatusInternalServerError, err)
+			return
+		}
+		lib, _ = s.Store.Library(lib.ID)
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"library": lib})
 }
@@ -237,6 +249,72 @@ func (s *Server) catalog(w http.ResponseWriter, r *http.Request, dev *store.Devi
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"nodes": nodes, "version": s.Store.CatalogVersion(libID)})
+}
+
+type createShareRequest struct {
+	Library   string `json:"library"`
+	Path      string `json:"path"`
+	IsDir     bool   `json:"is_dir"`
+	ExpiresIn int    `json:"expires_in"`
+	Password  string `json:"password"`
+}
+
+func (s *Server) createShare(w http.ResponseWriter, r *http.Request, dev *store.Device) {
+	if s.ShareSecret == "" {
+		fail(w, http.StatusNotImplemented, errors.New("sharing is not configured"))
+		return
+	}
+	var req createShareRequest
+	if err := decode(r, &req); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.Library == "" || req.Path == "" {
+		fail(w, http.StatusBadRequest, errors.New("library and path are required"))
+		return
+	}
+	if !s.Store.DeviceCanAccess(dev.ID, req.Library) {
+		fail(w, http.StatusForbidden, errors.New("no access to library"))
+		return
+	}
+	lib, ok := s.Store.Library(req.Library)
+	if !ok {
+		fail(w, http.StatusNotFound, errors.New("library not found"))
+		return
+	}
+	if lib.OriginURL == "" {
+		fail(w, http.StatusConflict, errors.New("library has no origin_url"))
+		return
+	}
+	ttl := req.ExpiresIn
+	if ttl <= 0 {
+		ttl = 7 * 24 * 3600
+	}
+	if ttl > 30*24*3600 {
+		ttl = 30 * 24 * 3600
+	}
+	path := strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(req.Path)), "/")
+	if path == "" || path == "." || strings.HasPrefix(path, "../") {
+		fail(w, http.StatusBadRequest, errors.New("invalid path"))
+		return
+	}
+	expires := time.Now().Add(time.Duration(ttl) * time.Second)
+	p := share.Payload{
+		Library: lib.ID,
+		Path:    path,
+		Dir:     req.IsDir,
+		Expires: expires.Unix(),
+	}
+	if req.Password != "" {
+		p.Password = share.PasswordHash(req.Password)
+	}
+	token, err := share.Sign(s.ShareSecret, p)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
+	url := strings.TrimRight(lib.OriginURL, "/") + "/s/" + token
+	writeJSON(w, http.StatusCreated, map[string]any{"url": url, "token": token, "expires_at": expires})
 }
 
 type originDevice struct {

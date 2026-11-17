@@ -210,7 +210,8 @@ def main():
     log(f"origin={origin_id} client={client_id}")
 
     start([os.path.join(APP, "syncscoped"), "-addr", "127.0.0.1:18088",
-           "-data", os.path.join(RUN, "state.json"), "-admin-token", ADMIN],
+           "-data", os.path.join(RUN, "state.json"), "-admin-token", ADMIN,
+           "-share-secret", "test-share"],
           os.path.join(RUN, "control.log"))
     wait_http(CONTROL + "/v1/health")
 
@@ -234,7 +235,9 @@ def main():
     with open(os.path.join(libroot, "2025", "other.txt"), "w") as f:
         f.write("other\n")
 
-    status, body = api("POST", "/v1/libraries", {"name": "Photo", "root_path": libroot}, admin=ADMIN)
+    status, body = api("POST", "/v1/libraries", {
+        "name": "Photo", "root_path": libroot, "origin_url": "http://127.0.0.1:18090",
+    }, admin=ADMIN)
     assert status == 201, (status, body)
     lib = body["library"]
     status, body = api("POST", f"/v1/libraries/{lib['id']}/grants", {"device_id": dev_id}, admin=ADMIN)
@@ -247,7 +250,8 @@ def main():
     run([os.path.join(APP, "syncscope-origin"),
          "-control", CONTROL, "-admin-token", ADMIN,
          "-syncthing", f"http://127.0.0.1:{PORTS['origin']}",
-         "-syncthing-key", keys["origin"], "-once"])
+         "-syncthing-key", keys["origin"],
+         "-http", "127.0.0.1:18090", "-share-secret", "test-share", "-once"])
 
     state_file = os.path.join(RUN, "selection.json")
     log("select /2024")
@@ -305,7 +309,9 @@ def main():
     os.makedirs(os.path.join(lib2root, "docs"), exist_ok=True)
     with open(os.path.join(lib2root, "docs", "readme.md"), "w") as f:
         f.write("# second mount\n")
-    status, body = api("POST", "/v1/libraries", {"name": "Docs", "root_path": lib2root}, admin=ADMIN)
+    status, body = api("POST", "/v1/libraries", {
+        "name": "Docs", "root_path": lib2root, "origin_url": "http://127.0.0.1:18090",
+    }, admin=ADMIN)
     assert status == 201, (status, body)
     lib2 = body["library"]
     status, body = api("POST", f"/v1/libraries/{lib2['id']}/grants", {"device_id": dev_id}, admin=ADMIN)
@@ -313,7 +319,8 @@ def main():
     run([os.path.join(APP, "syncscope-origin"),
          "-control", CONTROL, "-admin-token", ADMIN,
          "-syncthing", f"http://127.0.0.1:{PORTS['origin']}",
-         "-syncthing-key", keys["origin"], "-once"])
+         "-syncthing-key", keys["origin"],
+         "-http", "127.0.0.1:18090", "-share-secret", "test-share", "-once"])
     os.makedirs(os.path.join(RUN, "client-data2"), exist_ok=True)
 
     log("navigator UI (multi-mount)")
@@ -373,6 +380,27 @@ def main():
     assert os.path.exists(os.path.join(libroot, "2025", "report.pdf")), "free space touched origin"
     log("UI and free space OK")
 
+    log("public share")
+    start([os.path.join(APP, "syncscope-origin"),
+           "-control", CONTROL, "-admin-token", ADMIN,
+           "-syncthing", f"http://127.0.0.1:{PORTS['origin']}",
+           "-syncthing-key", keys["origin"],
+           "-http", "127.0.0.1:18090", "-share-secret", "test-share",
+           "-interval", "2s"], os.path.join(RUN, "origin-share.log"))
+    wait_http("http://127.0.0.1:18090/healthz")
+    status, body = api("POST", "/v1/shares", {
+        "library": lib["id"], "path": "2024", "is_dir": True, "expires_in": 3600,
+    }, token=client_token)
+    assert status == 201, (status, body)
+    share_url = body["url"]
+    page = urllib.request.urlopen(share_url, timeout=5).read().decode()
+    assert "a.txt" in page, page[:300]
+    token = share_url.rsplit("/", 1)[-1]
+    shared = urllib.request.urlopen(
+        f"http://127.0.0.1:18090/s/{token}/download?path=a.txt", timeout=5).read()
+    assert shared == b"selected\n", shared
+    log("public share OK")
+
     log("live catalog")
     os.makedirs(os.path.join(libroot, "2026"), exist_ok=True)
     with open(os.path.join(libroot, "2026", "live.txt"), "w") as f:
@@ -385,10 +413,7 @@ def main():
     log("revoke device")
     status, _ = api("POST", f"/v1/devices/{dev_id}/revoke", admin=ADMIN)
     assert status == 200, status
-    run([os.path.join(APP, "syncscope-origin"),
-         "-control", CONTROL, "-admin-token", ADMIN,
-         "-syncthing", f"http://127.0.0.1:{PORTS['origin']}",
-         "-syncthing-key", keys["origin"], "-once"])
+    time.sleep(4)
     for lid in (lib["id"], lib2["id"]):
         folder = st(PORTS["origin"], keys["origin"], f"/rest/config/folders/{lid}")
         ids = [d["deviceID"] for d in folder["devices"]]

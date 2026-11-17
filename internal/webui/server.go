@@ -53,6 +53,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/preview", s.serveFile(false))
 	mux.HandleFunc("GET /api/download", s.serveFile(true))
 	mux.HandleFunc("POST /api/free-space", s.freeSpace)
+	mux.HandleFunc("POST /api/share", s.shareLink)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(mustSub(staticFS, "static")))))
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		b, err := staticFS.ReadFile("static/index.html")
@@ -233,6 +234,44 @@ func (s *Server) serveFile(download bool) http.HandlerFunc {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		http.ServeFile(w, r, target)
 	}
+}
+
+type shareLinkRequest struct {
+	Mount     string `json:"mount"`
+	Path      string `json:"path"`
+	IsDir     bool   `json:"is_dir"`
+	ExpiresIn int    `json:"expires_in"`
+	Password  string `json:"password"`
+}
+
+func (s *Server) shareLink(w http.ResponseWriter, r *http.Request) {
+	var req shareLinkRequest
+	if err := decode(r, &req); err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	m, err := s.mount(req.Mount)
+	if err != nil {
+		writeJSON(w, 404, map[string]string{"error": err.Error()})
+		return
+	}
+	p, err := cleanRel(req.Path)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	link, err := s.Control.CreateShare(r.Context(), control.ShareRequest{
+		Library:   m.Library.ID,
+		Path:      p,
+		IsDir:     req.IsDir,
+		ExpiresIn: req.ExpiresIn,
+		Password:  req.Password,
+	})
+	if err != nil {
+		writeJSON(w, 502, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, link)
 }
 
 type freeSpaceRequest struct {

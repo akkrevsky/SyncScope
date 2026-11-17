@@ -114,3 +114,23 @@ func (c *Client) Catalog(ctx context.Context, libraryID, parent string) (Catalog
 	err := c.do(ctx, http.MethodGet, path, nil, &out)
 	return out, err
 }
+
+type ShareRequest struct {
+	Library   string `json:"library"`
+	Path      string `json:"path"`
+	IsDir     bool   `json:"is_dir"`
+	ExpiresIn int    `json:"expires_in"`
+	Password  string `json:"password"`
+}
+
+type ShareLink struct {
+	URL       string `json:"url"`
+	Token     string `json:"token"`
+	ExpiresAt string `json:"expires_at"`
+}
+
+func (c *Client) CreateShare(ctx context.Context, req ShareRequest) (ShareLink, error) {
+	var out ShareLink
+	err := c.do(ctx, http.MethodPost, "/v1/shares", req, &out)
+	return out, err
+}

@@ -4,12 +4,14 @@ import (
 	"context"
 	"flag"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"syncscope/internal/control"
+	"syncscope/internal/originshare"
 	"syncscope/internal/syncthing"
 )
 
@@ -18,6 +20,9 @@ func main() {
 	adminToken := flag.String("admin-token", env("SYNCSCOPE_ADMIN_TOKEN", "dev-admin-token"), "admin token")
 	stURL := flag.String("syncthing", "http://127.0.0.1:8384", "Syncthing API URL")
 	stKey := flag.String("syncthing-key", env("SYNCTHING_API_KEY", ""), "Syncthing API key")
+	httpAddr := flag.String("http", "127.0.0.1:8090", "public share HTTP listen address")
+	shareBase := flag.String("share-base", "/", "public URL base path for share pages, e.g. /syncscope-share/")
+	shareSecret := flag.String("share-secret", env("SHARE_SECRET", ""), "HMAC secret for share links")
 	interval := flag.Duration("interval", 10*time.Second, "reconcile interval")
 	once := flag.Bool("once", false, "run once and exit")
 	flag.Parse()
@@ -26,6 +31,15 @@ func main() {
 	ctl := control.New(*controlURL)
 	ctl.AdminToken = *adminToken
 	st := syncthing.New(*stURL, *stKey)
+	shares := originshare.New(*shareSecret, *shareBase, log)
+	if *httpAddr != "" {
+		go func() {
+			log.Info("share server", "addr", *httpAddr)
+			if err := http.ListenAndServe(*httpAddr, shares.Handler()); err != nil {
+				log.Error("share server", "err", err)
+			}
+		}()
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -37,7 +51,7 @@ func main() {
 	}()
 
 	for {
-		if err := reconcile(ctx, ctl, st, log); err != nil {
+		if err := reconcile(ctx, ctl, st, shares, log); err != nil {
 			log.Error("reconcile", "err", err)
 		}
 		if *once {
@@ -51,7 +65,7 @@ func main() {
 	}
 }
 
-func reconcile(ctx context.Context, ctl *control.Client, st *syncthing.Client, log *slog.Logger) error {
+func reconcile(ctx context.Context, ctl *control.Client, st *syncthing.Client, shares *originshare.Server, log *slog.Logger) error {
 	status, err := st.Status(ctx)
 	if err != nil {
 		return err
@@ -60,6 +74,11 @@ func reconcile(ctx context.Context, ctl *control.Client, st *syncthing.Client, l
 	if err != nil {
 		return err
 	}
+	roots := make(map[string]string, len(libs))
+	for _, ol := range libs {
+		roots[ol.Library.ID] = ol.Library.RootPath
+	}
+	shares.SetLibraries(roots)
 	for _, ol := range libs {
 		ids := []string{status.MyID}
 		for _, d := range ol.Devices {

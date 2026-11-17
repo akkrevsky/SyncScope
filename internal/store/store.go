@@ -46,6 +46,7 @@ type Library struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
 	RootPath  string    `json:"root_path"`
+	OriginURL string    `json:"origin_url,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -333,6 +334,23 @@ func (s *Store) CreateLibrary(name, root string) (*Library, error) {
 		return nil, err
 	}
 	return lib, nil
+}
+
+func (s *Store) SetLibraryOrigin(id, originURL string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	lib, ok := s.data.Libraries[id]
+	if !ok {
+		return fmt.Errorf("library not found")
+	}
+	lib.OriginURL = strings.TrimRight(strings.TrimSpace(originURL), "/")
+	return s.saveLocked()
+}
+
+func (s *Store) DeviceCanAccess(deviceID, libraryID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.hasGrantLocked(deviceID, libraryID)
 }
 
 func (s *Store) Library(id string) (*Library, bool) {

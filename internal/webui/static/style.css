@@ -132,7 +132,7 @@ svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width:
 
 /* list */
 .list { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); }
-.list-head, .row { display: grid; grid-template-columns: 34px minmax(220px, 1fr) 110px 150px 140px 120px; align-items: center; gap: 8px; padding: 0 12px; }
+.list-head, .row { display: grid; grid-template-columns: 34px minmax(220px, 1fr) 110px 150px 140px 170px; align-items: center; gap: 8px; padding: 0 12px; }
 .list-head { height: 40px; background: var(--panel-2); border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; font-weight: 600; position: sticky; top: 0; z-index: 2; }
 .row { min-height: 52px; border-bottom: 1px solid var(--line); cursor: default; }
 .row:last-child { border-bottom: 0; }
