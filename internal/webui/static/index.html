@@ -8,65 +8,100 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><span class="dot"></span> SyncScope</div>
-    <div class="libname" id="libname">…</div>
-    <div class="status" id="status">
+    <div class="brand">
+      <span class="logo">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l2 2h5.5A2.5 2.5 0 0 1 20 9.5v7A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5v-9Z"/><path d="M8 13.5h8M8 16h5"/></svg>
+      </span>
+      <span class="brand-name">SyncScope</span>
+      <span class="mount" id="libname">…</span>
+    </div>
+    <div class="topsearch">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg>
+      <input id="search" placeholder="Поиск" autocomplete="off">
+      <kbd>/</kbd>
+    </div>
+    <div class="topright">
       <span class="pill" id="conn">connecting</span>
       <span class="pill" id="sync">—</span>
+      <button class="iconbtn" id="theme" title="Тема">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v2M12 19v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M3 12h2M19 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/><circle cx="12" cy="12" r="4"/></svg>
+      </button>
     </div>
   </header>
 
-  <main class="layout">
+  <div class="app">
     <aside class="sidebar">
-      <div class="sidebar-head">
+      <div class="sidehead">
         <span>Каталог</span>
-        <button class="icon" id="refresh" title="Обновить">↻</button>
+        <button class="iconbtn" id="refresh" title="Обновить">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 6.7"/><path d="M20 4v7h-7"/></svg>
+        </button>
       </div>
       <div class="tree" id="tree"><div class="muted">Загрузка…</div></div>
+      <div class="sidefoot">
+        <div class="sidefoot-row"><span>Выбрано</span><b id="sidesummary">—</b></div>
+        <div class="sidefoot-hint">Выбор применяется сразу</div>
+      </div>
     </aside>
 
-    <section class="content">
+    <main class="main">
       <div class="toolbar">
         <nav class="crumbs" id="crumbs"></nav>
-        <input class="search" id="search" placeholder="Фильтр в текущей папке…" autocomplete="off">
+        <div class="toolbar-actions">
+          <div class="segmented" role="group" aria-label="Вид">
+            <button id="view-list" class="active" title="Список">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h12M8 12h12M8 18h12"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/></svg>
+            </button>
+            <button id="view-grid" title="Сетка">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg>
+            </button>
+          </div>
+          <button class="iconbtn" id="refresh2" title="Обновить">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 6.7"/><path d="M20 4v7h-7"/></svg>
+          </button>
+        </div>
       </div>
 
-      <div class="summary">
-        <span id="summary">Ничего не выбрано</span>
-        <span class="hint">Выбор применяется сразу</span>
+      <div class="contenthead">
+        <div>
+          <h1 id="foldertitle">Корень</h1>
+          <p id="foldersub">—</p>
+        </div>
+        <div class="summary" id="summary"></div>
       </div>
 
-      <div class="tablewrap">
-        <table class="files">
-          <thead>
-            <tr>
-              <th class="check"></th>
-              <th>Имя</th>
-              <th class="size">Размер</th>
-              <th class="mtime">Изменён</th>
-              <th class="state">Статус</th>
-              <th class="actions"></th>
-            </tr>
-          </thead>
-          <tbody id="rows">
-            <tr><td colspan="6" class="muted">Загрузка…</td></tr>
-          </tbody>
-        </table>
+      <div class="browser" id="browser">
+        <div class="empty">Загрузка…</div>
       </div>
+
       <div class="statusbar" id="statusbar">—</div>
-    </section>
-  </main>
+    </main>
+  </div>
 
-  <template id="row-template">
-    <tr>
-      <td class="check"></td>
-      <td class="name"><button class="link"></button><span class="sub"></span></td>
-      <td class="size"></td>
-      <td class="mtime"></td>
-      <td class="state"><span class="badge"></span></td>
-      <td class="actions"></td>
-    </tr>
-  </template>
+  <div class="modal" id="preview" hidden>
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-card">
+      <div class="modal-head">
+        <div class="modal-title">
+          <span id="preview-icon"></span>
+          <div>
+            <b id="preview-name">—</b>
+            <small id="preview-meta"></small>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <a class="btn" id="preview-download" href="#" download>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M8 11l4 4 4-4M5 20h14"/></svg>
+            Скачать
+          </a>
+          <button class="iconbtn" data-close title="Закрыть">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="modal-body" id="preview-body"></div>
+    </div>
+  </div>
 
   <script src="/static/app.js"></script>
 </body>

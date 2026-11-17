@@ -316,6 +316,15 @@ def main():
     assert "SyncScope" in html, "UI index missing"
     cat = ui_json("/api/catalog?parent=")
     assert len(cat["nodes"]) == 2, cat
+    preview = urllib.request.urlopen("http://127.0.0.1:18099/api/preview?path=2024/a.txt", timeout=5).read()
+    assert preview == b"selected\n", preview
+    download = urllib.request.urlopen("http://127.0.0.1:18099/api/download?path=2024/a.txt", timeout=5)
+    assert download.status == 200
+    try:
+        urllib.request.urlopen("http://127.0.0.1:18099/api/preview?path=../etc/passwd", timeout=5)
+        raise AssertionError("path traversal was not rejected")
+    except urllib.error.HTTPError as e:
+        assert e.code in (400, 404), e.code
     ui_json("/api/selection", "POST", {"included": ["2025"], "excluded": []})
     wait_file("client-data/2025/report.pdf")
     status = ui_json("/api/status")

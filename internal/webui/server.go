@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -43,6 +44,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/selection", s.getSelection)
 	mux.HandleFunc("POST /api/selection", s.setSelection)
 	mux.HandleFunc("GET /api/status", s.status)
+	mux.HandleFunc("GET /api/preview", s.serveFile(false))
+	mux.HandleFunc("GET /api/download", s.serveFile(true))
 	mux.HandleFunc("POST /api/free-space", s.freeSpace)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(mustSub(staticFS, "static")))))
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
@@ -127,6 +130,38 @@ type statusResponse struct {
 	Connected  bool   `json:"connected"`
 	ConnType   string `json:"connection_type"`
 	ConnAddr   string `json:"connection_address"`
+}
+
+func (s *Server) serveFile(download bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		p, err := cleanRel(r.URL.Query().Get("path"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		target := filepath.Join(s.LocalPath, filepath.FromSlash(p))
+		rel, err := filepath.Rel(s.LocalPath, target)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			http.Error(w, "invalid path", http.StatusBadRequest)
+			return
+		}
+		st, err := os.Stat(target)
+		if err != nil {
+			http.Error(w, "file is not available locally", http.StatusNotFound)
+			return
+		}
+		if st.IsDir() {
+			http.Error(w, "is a directory", http.StatusBadRequest)
+			return
+		}
+		disp := "inline"
+		if download {
+			disp = "attachment"
+		}
+		w.Header().Set("Content-Disposition", mime.FormatMediaType(disp, map[string]string{"filename": filepath.Base(target)}))
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		http.ServeFile(w, r, target)
+	}
 }
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
